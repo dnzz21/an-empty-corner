@@ -1,0 +1,130 @@
+name: Render scratch to star
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install render tools
+        run: |
+          python -m pip install Pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+
+      - name: Render the clip
+        run: |
+          python - <<'PY'
+          import math
+          import random
+          import subprocess
+
+          from PIL import Image, ImageDraw, ImageFilter, ImageOps
+
+          width, height = 1280, 720
+          fps, seconds = 24, 8
+          centre_x, centre_y = width // 2, height // 2
+
+          with Image.open("corner.jpg") as source:
+              photo = ImageOps.fit(
+                  ImageOps.exif_transpose(source).convert("RGB"),
+                  (width, height),
+              )
+
+          black = Image.new("RGB", (width, height))
+          rng = random.Random(17)
+          stars = [
+              (rng.randint(0, width - 1), rng.randint(0, height - 1),
+               rng.randint(22, 115), rng.uniform(5.2, 7.2))
+              for _ in range(160)
+          ]
+
+          def fade(time, start, end):
+              progress = max(0, min(1, (time - start) / (end - start)))
+              return progress * progress * (3 - 2 * progress)
+
+          command = [
+              "ffmpeg", "-y", "-loglevel", "error",
+              "-f", "rawvideo", "-pixel_format", "rgb24",
+              "-video_size", f"{width}x{height}", "-framerate", str(fps),
+              "-i", "-", "-an", "-c:v", "libx264", "-crf", "18",
+              "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+              "scratch-to-star.mp4",
+          ]
+
+          with subprocess.Popen(command, stdin=subprocess.PIPE) as encoder:
+              for frame_number in range(fps * seconds):
+                  time = frame_number / fps
+
+                  # Hold on the corner, then push steadily into the scratch.
+                  zoom = math.exp(0.6 * max(0, time - 1.0))
+                  half_width = centre_x / zoom
+                  half_height = centre_y / zoom
+                  box = (
+                      centre_x - half_width, centre_y - half_height,
+                      centre_x + half_width, centre_y + half_height,
+                  )
+                  frame = photo.resize(
+                      (width, height), Image.Resampling.BICUBIC, box=box
+                  )
+                  frame = Image.blend(frame, black, fade(time, 2.5, 4.7))
+
+                  # The point appears before anything around it reads as space.
+                  glow = Image.new("RGB", (width, height))
+                  glow_draw = ImageDraw.Draw(glow)
+                  reveal = fade(time, 5.0, 7.6)
+                  radius = int(2 + 12 * reveal)
+                  glow_draw.ellipse(
+                      (centre_x - radius, centre_y - radius,
+                       centre_x + radius, centre_y + radius),
+                      fill=(48, 61, 85),
+                  )
+                  glow = glow.filter(ImageFilter.GaussianBlur(7))
+                  from PIL import ImageChops
+                  frame = ImageChops.add(frame, Image.blend(black, glow, reveal))
+
+                  draw = ImageDraw.Draw(frame)
+                  drift = 1 + 0.10 * max(0, time - 5.0)
+                  for x, y, brightness, start in stars:
+                      level = int(brightness * fade(time, start, start + 0.7))
+                      if level:
+                          draw.point(
+                              (int(centre_x + (x - centre_x) * drift),
+                               int(centre_y + (y - centre_y) * drift)),
+                              fill=(level, level, min(255, level + 10)),
+                          )
+
+                  level = int(255 * fade(time, 3.9, 5.4))
+                  if level:
+                      core = 1 + int(2 * reveal)
+                      draw.ellipse(
+                          (centre_x - core, centre_y - core,
+                           centre_x + core, centre_y + core),
+                          fill=(level, level, level),
+                      )
+
+                  encoder.stdin.write(frame.tobytes())
+
+              encoder.stdin.close()
+              if encoder.wait() != 0:
+                  raise RuntimeError("FFmpeg failed to encode the video.")
+          PY
+
+      - name: Save the finished video
+        uses: actions/upload-artifact@v4
+        with:
+          name: scratch-to-star
+          path: scratch-to-star.mp4
+          if-no-files-found: error
+          retention-days: 3
