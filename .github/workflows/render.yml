@@ -36,7 +36,7 @@ jobs:
           fps, seconds = 24, 8
           centre_x, centre_y = width // 2, height // 2
 
-          with Image.open("corner.jpg") as source:
+          with Image.open("corner.png") as source:
               photo = ImageOps.fit(
                   ImageOps.exif_transpose(source).convert("RGB"),
                   (width, height),
